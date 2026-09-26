@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import FaceScanner from '../components/FaceScanner';
 import VoterCardScanner from '../components/VoterCardScanner';
 import OTPModal from '../components/OTPModal';
-import { ShieldCheck, User, Lock, ArrowRight, AlertTriangle } from 'lucide-react';
+import { ShieldCheck, User, Lock, ArrowRight, AlertTriangle, CreditCard, Scan, Phone } from 'lucide-react';
 
 const Login = () => {
   const navigate = useNavigate();
@@ -18,11 +18,11 @@ const Login = () => {
   // Auth State
   const [voterId, setVoterId] = useState('');
   const [password, setPassword] = useState('');
-  const [challengeToken, setChallengeToken] = useState('');
   const [userPhone, setUserPhone] = useState('');
+  const [devOtp, setDevOtp] = useState(null);
   const [showOtpModal, setShowOtpModal] = useState(false);
 
-  // Step 1: Submit Voter ID & Password -> Obtains signed MFA challengeToken
+  // Step 1: Submit Voter ID & Password
   const handleStep1Submit = async (e) => {
     e.preventDefault();
     try {
@@ -32,7 +32,6 @@ const Login = () => {
       const res = await API.post('/auth/login-step1', { voterId, password });
 
       setLoading(false);
-      setChallengeToken(res.data.challengeToken);
       setUserPhone(res.data.phone);
       setStep(2); // Proceed to Voter Card Document Scan Challenge
     } catch (err) {
@@ -41,19 +40,18 @@ const Login = () => {
     }
   };
 
-  // Step 2: Voter Card Scan Complete Callback -> Passes challengeToken
+  // Step 2: Voter Card Scan Complete Callback
   const handleCardComplete = async (scannedCardData) => {
     try {
       setLoading(true);
       setError(null);
 
-      const res = await API.post('/auth/verify-card', {
-        challengeToken,
+      await API.post('/auth/verify-card', {
+        voterId,
         scannedCardData,
       });
 
       setLoading(false);
-      setChallengeToken(res.data.challengeToken);
       setStep(3); // Proceed to Biometric Face Challenge
     } catch (err) {
       setLoading(false);
@@ -61,31 +59,31 @@ const Login = () => {
     }
   };
 
-  // Step 3: Face Scanner Complete Callback -> Passes challengeToken
+  // Step 3: Face Scanner Complete Callback
   const handleFaceScanComplete = async (liveDescriptor) => {
     try {
       setLoading(true);
       setError(null);
 
       const res = await API.post('/auth/verify-face', {
-        challengeToken,
+        voterId,
         liveFaceDescriptor: liveDescriptor,
       });
 
       setLoading(false);
-      setChallengeToken(res.data.challengeToken);
-      setShowOtpModal(true); // Open OTP verification modal dialog
+      setDevOtp(res.data.fallbackOtp);
+      setShowOtpModal(true); // Open 6-digit OTP verification modal dialog for registered phone
     } catch (err) {
       setLoading(false);
       setError(err.message || 'Biometric Face Verification Failed. Try again.');
     }
   };
 
-  // Step 4: Verify Phone OTP Submission from Modal -> Passes challengeToken
+  // Step 4: Verify Phone OTP Submission from Modal
   const handleOtpVerify = async (otpCode) => {
     try {
       const res = await API.post('/auth/verify-otp', {
-        challengeToken,
+        phone: userPhone,
         otp: otpCode,
       });
 
@@ -208,6 +206,7 @@ const Login = () => {
         onClose={() => setShowOtpModal(false)}
         onVerify={handleOtpVerify}
         phone={userPhone}
+        devOtp={devOtp}
       />
     </div>
   );

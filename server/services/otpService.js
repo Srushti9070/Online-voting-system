@@ -1,6 +1,6 @@
 const transporter = require('../config/mailer');
 
-// In-Memory store for active Phone & Email OTP codes: { key: { otp: string, expiresAt: timestamp } }
+// In-Memory store for active OTP codes: { key: { otp: string, attempts: number, expiresAt: timestamp } }
 const otpStore = new Map();
 
 /**
@@ -11,25 +11,21 @@ const generateOTP = () => {
 };
 
 /**
- * Sends a Phone SMS OTP code to the registered voter's phone number.
- * Also sends a backup email copy if SMTP is configured.
- * 
- * @param {string} phone Registered voter phone number
- * @param {string} voterName Full name of voter
- * @param {string} email Optional backup voter email
+ * Sends a Phone SMS/Email OTP code to the registered voter's phone number and email.
+ * OTP is NOT returned to client API responses; it is delivered via email or server console log in dev.
  */
 const sendPhoneOTP = async (phone, voterName, email = '') => {
   const otp = generateOTP();
   const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes validity
 
-  // Store OTP in cache using phone number key
-  otpStore.set(phone, { otp, expiresAt });
-  if (email) {
-    otpStore.set(email, { otp, expiresAt });
-  }
+  const record = { otp, attempts: 0, expiresAt };
+
+  // Store OTP in cache using phone number and email keys
+  if (phone) otpStore.set(phone.trim(), record);
+  if (email) otpStore.set(email.toLowerCase().trim(), record);
 
   console.log(`==================================================`);
-  console.log(`📱 SMS OTP GENERATED for ${voterName} (${phone}): ${otp}`);
+  console.log(`🔒 SECURITY LOG: SMS OTP dispatched for ${voterName} (${phone}): ${otp}`);
   console.log(`==================================================`);
 
   // Attempt Real Email Sending if SMTP credentials exist in .env
@@ -43,17 +39,17 @@ const sendPhoneOTP = async (phone, voterName, email = '') => {
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #0B0F19; color: #ffffff; border-radius: 12px; padding: 24px; border: 1px solid #38BDF8;">
             <h2 style="color: #38BDF8;">🏛️ TrustVote Multi-Factor Authentication Passcode</h2>
             <p>Hello <strong>${voterName}</strong>,</p>
-            <p>Your 6-digit SMS security passcode is:</p>
+            <p>Your 6-digit security passcode is:</p>
             <div style="text-align: center; margin: 20px 0;">
               <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #06B6D4; background: rgba(6, 182, 212, 0.1); padding: 12px 24px; border-radius: 8px; border: 1px solid #06B6D4; display: inline-block;">
                 ${otp}
               </span>
             </div>
-            <p style="font-size: 12px; color: #9CA3AF;">This passcode is valid for 5 minutes. Registered Phone: ${phone}</p>
+            <p style="font-size: 12px; color: #9CA3AF;">Valid for 5 minutes. Maximum 3 verification attempts allowed.</p>
           </div>
         `,
       });
-      console.log(`✉️ Backup OTP Email dispatched to ${email}`);
+      console.log(`✉️ OTP Email successfully dispatched to ${email}`);
     } catch (err) {
       console.warn(`⚠️ Email dispatch notice: ${err.message}`);
     }
@@ -61,34 +57,44 @@ const sendPhoneOTP = async (phone, voterName, email = '') => {
 
   return {
     success: true,
-    otp, // Returned so UI modal can display sandbox preview card for testing
-    message: `SMS OTP code generated for registered phone ${phone}`,
+    message: `OTP code generated and sent to registered contact.`,
   };
 };
 
 /**
- * Verifies submitted Phone/Email OTP against cached entry.
- * @param {string} key Phone number or email address
- * @param {string} enteredOTP Submitted 6-digit string
+ * Verifies submitted Phone/Email OTP with max 3 attempts cap.
  */
 const verifyOTP = (key, enteredOTP) => {
-  const record = otpStore.get(key);
+  if (!key) {
+    return { valid: false, message: 'Invalid verification target' };
+  }
+
+  const cleanKey = key.trim();
+  const record = otpStore.get(cleanKey);
 
   if (!record) {
-    return { valid: false, message: 'OTP expired or not requested' };
+    return { valid: false, message: 'OTP expired or not requested. Please restart login.' };
   }
 
   if (Date.now() > record.expiresAt) {
-    otpStore.delete(key);
-    return { valid: false, message: 'OTP code has expired' };
+    otpStore.delete(cleanKey);
+    return { valid: false, message: 'OTP code has expired. Please request a new code.' };
+  }
+
+  // Enforce Max 3 Attempts Rate Limiting / Brute-force Prevention
+  record.attempts += 1;
+  if (record.attempts > 3) {
+    otpStore.delete(cleanKey);
+    return { valid: false, message: 'Maximum OTP verification attempts exceeded (3/3). Authentication session locked.' };
   }
 
   if (record.otp !== enteredOTP.trim()) {
-    return { valid: false, message: 'Invalid OTP verification code' };
+    const remaining = 3 - record.attempts;
+    return { valid: false, message: `Invalid OTP verification code. ${remaining} attempts remaining.` };
   }
 
   // Consume OTP upon successful match
-  otpStore.delete(key);
+  otpStore.delete(cleanKey);
   return { valid: true, message: 'OTP verified successfully' };
 };
 

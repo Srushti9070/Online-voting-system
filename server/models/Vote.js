@@ -1,30 +1,29 @@
 const mongoose = require('mongoose');
 
 /**
- * Vote Receipt Schema
- * Prevents double-voting per election using an anonymous cryptographic voter token.
- * Stores voterUserId link ONLY for private receipt inspection by the voter themselves.
+ * Vote Schema
+ * Represents an individual vote cast in an election.
+ * Enforces atomic double-voting prevention via unique compound indexes.
  */
 const VoteSchema = new mongoose.Schema({
   election: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Election',
-    required: [true, 'Election ID is required'],
+    required: [true, 'Election assignment is required'],
   },
   voterUser: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true,
+    required: [true, 'Voter reference is required for private voter receipt lookup'],
   },
   candidateVotedFor: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Candidate',
-    required: true,
+    required: [true, 'Candidate reference is required'],
   },
   anonymousVoterToken: {
-    type: String,
-    required: true,
-    unique: true, // Guarantees 1 Person 1 Vote per election
+    type: String, // Cryptographic SHA-256 hash token: SHA256(voterId + electionId)
+    required: [true, 'Anonymous voter token is required'],
   },
   votedAt: {
     type: Date,
@@ -34,7 +33,8 @@ const VoteSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Index to quickly check duplicate vote attempts
+// Atomic Compound Unique Indexes to prevent race condition double-voting
 VoteSchema.index({ election: 1, anonymousVoterToken: 1 }, { unique: true });
+VoteSchema.index({ election: 1, voterUser: 1 }, { unique: true });
 
 module.exports = mongoose.model('Vote', VoteSchema);

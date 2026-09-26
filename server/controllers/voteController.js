@@ -8,7 +8,7 @@ const HomomorphicEngine = require('../utils/homomorphicEngine');
 const ZKProofEngine = require('../utils/zkProofEngine');
 const { generateAnonymousVoterToken } = require('../utils/hashUtils');
 
-// @desc    Cast an anonymous vote into the cryptographic blockchain ledger with ZK Proofs, Merkle Tree Receipts & pBFT Consensus
+// @desc    Cast an anonymous vote into the cryptographic blockchain ledger with atomic duplicate checks & pBFT Consensus
 // @route   POST /api/votes/cast
 // @access  Private/Voter
 const castVote = async (req, res) => {
@@ -17,10 +17,17 @@ const castVote = async (req, res) => {
     const voterId = req.user.voterId;
     const userId = req.user._id;
 
-    // 1. Verify election exists
+    if (!electionId || !candidateId) {
+      return res.status(400).json({ success: false, message: 'Election ID and Candidate ID are required' });
+    }
+
+    // 1. Verify election exists and is active
     const election = await Election.findById(electionId);
     if (!election) {
       return res.status(404).json({ success: false, message: 'Election not found' });
+    }
+    if (election.status !== 'Active') {
+      return res.status(400).json({ success: false, message: 'This election is not currently active for voting.' });
     }
 
     // 2. Verify candidate exists
@@ -29,14 +36,17 @@ const castVote = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Selected candidate not found' });
     }
 
-    // 3. Generate Zero-Knowledge Identity Proof & Nullifier Hash
+    // 3. Generate Zero-Knowledge Identity Proof & Anonymous Token
     const zkProof = ZKProofEngine.generateZKProof(voterId, electionId);
-
-    // 4. Generate anonymous voter token (SHA-256)
     const anonymousToken = generateAnonymousVoterToken(voterId, electionId);
 
-    // 5. Duplicate Vote Prevention Check (Biometric, ZK Nullifier & Voter ID)
-    const existingVote = await Vote.findOne({ election: electionId, anonymousVoterToken: anonymousToken });
+    // 4. Pre-check for existing vote
+    const existingVote = await Vote.findOne({
+      $or: [
+        { election: electionId, anonymousVoterToken: anonymousToken },
+        { election: electionId, voterUser: userId }
+      ]
+    });
     if (existingVote) {
       return res.status(400).json({
         success: false,
@@ -44,33 +54,42 @@ const castVote = async (req, res) => {
       });
     }
 
-    // 6. Encrypt Ballot using Homomorphic Encryption Cipher
+    // 5. Encrypt Ballot using Homomorphic Encryption Cipher
     const homomorphicCipher = HomomorphicEngine.encryptBallot(candidateId);
 
-    // 7. Initialize Blockchain Engine & Append Mined Block
+    // 6. Initialize Blockchain Engine & Append Mined Block to Ledger
     const blockchain = new Blockchain(electionId);
     await blockchain.initializeChain();
-
     const minedBlock = await blockchain.addVoteBlock(candidateId, anonymousToken);
 
-    // 8. Run pBFT Multi-Node Consensus Network Validation (EC Node, SC Node, IIT Node)
+    // 7. Run pBFT Multi-Node Consensus Network Validation
     const consensusNet = new ConsensusNetwork();
     const consensusResult = await consensusNet.validateAndSignBlock(minedBlock);
 
-    // 9. Generate Merkle Tree & O(log N) Cryptographic Inclusion Proof Receipt
+    // 8. Generate Merkle Tree & O(log N) Cryptographic Inclusion Proof Receipt
     const merkleTree = new MerkleTree([minedBlock.hash]);
     const merkleRoot = merkleTree.getRoot();
     const merkleProof = merkleTree.getProof(0);
 
-    // 10. Record vote receipt with ZK Nullifier & Merkle Root Receipt
-    await Vote.create({
-      election: electionId,
-      voterUser: userId,
-      candidateVotedFor: candidateId,
-      anonymousVoterToken: anonymousToken,
-    });
+    // 9. Atomic DB Record Insertion (Handled with unique compound index catch for 100% race-condition safety)
+    try {
+      await Vote.create({
+        election: electionId,
+        voterUser: userId,
+        candidateVotedFor: candidateId,
+        anonymousVoterToken: anonymousToken,
+      });
+    } catch (dbErr) {
+      if (dbErr.code === 11000) {
+        return res.status(400).json({
+          success: false,
+          message: 'Atomic Duplicate Vote Prevention: Vote already registered for this election.'
+        });
+      }
+      throw dbErr;
+    }
 
-    // 11. Calculate updated results directly from Blockchain
+    // 10. Calculate updated results directly from Blockchain ledger
     const voteCountsFromChain = await Blockchain.getVoteResultsFromChain(electionId);
     const candidates = await Candidate.find({ election: electionId });
     const formattedResults = candidates.map(cand => ({
@@ -81,7 +100,7 @@ const castVote = async (req, res) => {
       votes: voteCountsFromChain[cand._id.toString()] || 0,
     }));
 
-    // 12. Broadcast Real-Time Vote Count Event via Socket.io
+    // 11. Broadcast Real-Time Vote Count Event via Socket.io
     const io = req.app.get('io');
     if (io) {
       io.to(electionId.toString()).emit('vote_cast_event', {
@@ -96,7 +115,7 @@ const castVote = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: 'Vote successfully mined and sealed across multi-node pBFT consensus network with ZK Proof & Merkle Receipt!',
+      message: 'Vote successfully mined and sealed on the blockchain ledger!',
       block: {
         index: minedBlock.index,
         hash: minedBlock.hash,
@@ -119,8 +138,8 @@ const castVote = async (req, res) => {
       results: formattedResults
     });
   } catch (error) {
-    console.error(`❌ Senior Vote Engine Failure: ${error.message}`);
-    res.status(500).json({ success: false, message: error.message });
+    console.error(`❌ Vote Engine Failure:`, error);
+    res.status(500).json({ success: false, message: 'Failed to process vote submission securely. Please try again.' });
   }
 };
 
@@ -152,7 +171,8 @@ const getMyVoteReceipt = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error(`❌ Receipt Fetch Error:`, error);
+    res.status(500).json({ success: false, message: 'Failed to retrieve private vote receipt.' });
   }
 };
 
@@ -164,7 +184,12 @@ const checkVoterStatus = async (req, res) => {
     const { electionId } = req.params;
     const anonymousToken = generateAnonymousVoterToken(req.user.voterId, electionId);
 
-    const existingVote = await Vote.findOne({ election: electionId, anonymousVoterToken: anonymousToken });
+    const existingVote = await Vote.findOne({
+      $or: [
+        { election: electionId, anonymousVoterToken: anonymousToken },
+        { election: electionId, voterUser: req.user._id }
+      ]
+    });
 
     res.status(200).json({
       success: true,
@@ -172,7 +197,8 @@ const checkVoterStatus = async (req, res) => {
       votedAt: existingVote ? existingVote.votedAt : null,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error(`❌ Voter Status Error:`, error);
+    res.status(500).json({ success: false, message: 'Failed to check voting status.' });
   }
 };
 
@@ -206,7 +232,8 @@ const getLiveResults = async (req, res) => {
       results: formattedResults,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error(`❌ Live Results Error:`, error);
+    res.status(500).json({ success: false, message: 'Failed to retrieve live election results.' });
   }
 };
 
