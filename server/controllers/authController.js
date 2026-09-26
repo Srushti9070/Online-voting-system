@@ -1,6 +1,6 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
-const { verifyFaceMatch } = require('../services/faceService');
+const { verifyFaceMatch, findMatchingUserByFace } = require('../services/faceService');
 const { sendPhoneOTP, verifyOTP } = require('../services/otpService');
 const { hashVoterCardDocument } = require('../utils/hashUtils');
 
@@ -24,7 +24,6 @@ const generateToken = (id) => {
 
 /**
  * Generates a short-lived signed MFA Challenge Token (5 min validity)
- * Binds multi-factor step 1 -> step 2 -> step 3 -> step 4 together.
  */
 const generateChallengeToken = (voterId, step) => {
   return jwt.sign({ voterId, step, purpose: 'MFA_CHALLENGE' }, getJWTSecret(), {
@@ -47,13 +46,14 @@ const verifyChallengeToken = (token, expectedStep) => {
   }
 };
 
-// @desc    Register a new voter with Voter Card Hash, face descriptor, phone number, and location
+// @desc    Register a new voter with Global Biometric Uniqueness Enforcement
 // @route   POST /api/auth/register
 // @access  Public
 const registerUser = async (req, res) => {
   try {
     const { fullName, voterId, email, phone, password, faceDescriptor, locationId, voterCardData } = req.body;
 
+    // 1. Check if user already exists with Voter ID, Email, or Phone
     const existingUser = await User.findOne({ $or: [{ voterId }, { email }, { phone }] });
     if (existingUser) {
       return res.status(400).json({
@@ -66,6 +66,16 @@ const registerUser = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Biometric face registration descriptor vector is required.'
+      });
+    }
+
+    // 2. GLOBAL BIOMETRIC UNIQUENESS CHECK across ALL registered voters in database
+    const allUsers = await User.find({});
+    const duplicateFaceMatch = findMatchingUserByFace(faceDescriptor, allUsers);
+    if (duplicateFaceMatch.matched) {
+      return res.status(400).json({
+        success: false,
+        message: `Biometric Duplicate Blocked! This facial profile is ALREADY registered to Voter ID ${duplicateFaceMatch.user.voterId}. One person cannot create multiple voter accounts.`
       });
     }
 
@@ -86,7 +96,7 @@ const registerUser = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: 'Voter registration completed successfully.',
+      message: 'Voter registration completed successfully with unique biometric face profile.',
       token,
       user: {
         id: user._id,
@@ -125,7 +135,6 @@ const loginStep1 = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid Voter ID or Password' });
     }
 
-    // Issue signed short-lived MFA challenge token
     const challengeToken = generateChallengeToken(user.voterId, 1);
 
     res.status(200).json({
@@ -134,7 +143,7 @@ const loginStep1 = async (req, res) => {
       message: 'Credentials verified. Please scan your official Voter ID Card.',
       challengeToken,
       voterId: user.voterId,
-      phone: user.phone.replace(/.(?=.{4})/g, '*'), // Masked phone for UI preview
+      phone: user.phone.replace(/.(?=.{4})/g, '*'),
     });
   } catch (error) {
     console.error(`❌ Step 1 Error:`, error);
@@ -142,7 +151,7 @@ const loginStep1 = async (req, res) => {
   }
 };
 
-// @desc    Login Step 2: Verify Cryptographic Voter Card Document Hash -> Requires Challenge Token
+// @desc    Login Step 2: Verify Cryptographic Voter Card Document Hash
 // @route   POST /api/auth/verify-card
 // @access  Public
 const verifyVoterCardStep = async (req, res) => {
@@ -183,7 +192,7 @@ const verifyVoterCardStep = async (req, res) => {
   }
 };
 
-// @desc    Login Step 3: Biometric Face Verification -> Requires Challenge Token -> Dispatches OTP
+// @desc    Login Step 3: Biometric Face Verification with Cross-Account Impersonation Prevention
 // @route   POST /api/auth/verify-face
 // @access  Public
 const verifyFaceStep = async (req, res) => {
@@ -201,8 +210,21 @@ const verifyFaceStep = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Voter record not found' });
     }
 
+    // 1. Check face match against target user's registered face
     const matchResult = verifyFaceMatch(user.faceDescriptor, liveFaceDescriptor);
+
     if (!matchResult.isMatch) {
+      // 2. Check if scanned face matches a DIFFERENT registered voter in the database
+      const allUsers = await User.find({ _id: { $ne: user._id } });
+      const otherUserMatch = findMatchingUserByFace(liveFaceDescriptor, allUsers);
+
+      if (otherUserMatch.matched) {
+        return res.status(401).json({
+          success: false,
+          message: `Biometric Impersonation Blocked! Scanned face belongs to registered Voter ID ${otherUserMatch.user.voterId}, not ${user.voterId}. Access Denied.`
+        });
+      }
+
       return res.status(401).json({
         success: false,
         message: matchResult.message,
@@ -210,7 +232,7 @@ const verifyFaceStep = async (req, res) => {
       });
     }
 
-    // Face matched! Dispatch OTP to registered phone and email securely (NO fallbackOtp in response)
+    // Face matched cleanly! Dispatch OTP
     await sendPhoneOTP(user.phone, user.fullName, user.email);
 
     const nextChallengeToken = generateChallengeToken(voterId, 3);
@@ -229,7 +251,7 @@ const verifyFaceStep = async (req, res) => {
   }
 };
 
-// @desc    Login Step 4: Verify Phone/Email OTP Code -> Requires Challenge Token -> Issue JWT Session Token
+// @desc    Login Step 4: Verify Phone/Email OTP Code -> Issues JWT Session Token
 // @route   POST /api/auth/verify-otp
 // @access  Public
 const verifyOTPStep = async (req, res) => {

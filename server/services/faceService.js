@@ -1,10 +1,6 @@
 /**
  * Computes the Euclidean Distance between two 128-element biometric face descriptor vectors.
  * Lower distance indicates higher facial match similarity.
- * 
- * @param {Array<number>} desc1 Saved face descriptor from database
- * @param {Array<number>} desc2 Live scanned face descriptor from webcam
- * @returns {number} Euclidean distance float
  */
 const computeEuclideanDistance = (desc1, desc2) => {
   if (!desc1 || !desc2 || desc1.length !== desc2.length) {
@@ -24,10 +20,6 @@ const computeEuclideanDistance = (desc1, desc2) => {
  * Strict Biometric Face Verification Engine
  * Compares live facial scan descriptor against registered database descriptor.
  * Cutoff threshold: 0.45 for high security matching.
- * 
- * @param {Array<number>} registeredDescriptor Stored database descriptor
- * @param {Array<number>} liveDescriptor Live webcam descriptor
- * @param {number} threshold Strict distance cutoff (default: 0.45)
  */
 const verifyFaceMatch = (registeredDescriptor, liveDescriptor, threshold = 0.45) => {
   const distance = computeEuclideanDistance(registeredDescriptor, liveDescriptor);
@@ -44,7 +36,28 @@ const verifyFaceMatch = (registeredDescriptor, liveDescriptor, threshold = 0.45)
   };
 };
 
+/**
+ * Searches the database of all registered users to check if a face vector already belongs to ANY voter.
+ * Prevents 1 person from registering multiple Voter IDs with the same face.
+ * 
+ * @param {Array<number>} targetDescriptor Face vector to search
+ * @param {Array<object>} allUsers List of users with faceDescriptor fields
+ * @param {number} threshold Match distance cutoff (0.45)
+ */
+const findMatchingUserByFace = (targetDescriptor, allUsers = [], threshold = 0.45) => {
+  for (const user of allUsers) {
+    if (user.faceDescriptor && Array.isArray(user.faceDescriptor) && user.faceDescriptor.length === targetDescriptor.length) {
+      const dist = computeEuclideanDistance(user.faceDescriptor, targetDescriptor);
+      if (dist < threshold) {
+        return { matched: true, user, distance: dist };
+      }
+    }
+  }
+  return { matched: false };
+};
+
 module.exports = {
   computeEuclideanDistance,
-  verifyFaceMatch
+  verifyFaceMatch,
+  findMatchingUserByFace,
 };
