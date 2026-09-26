@@ -1,19 +1,16 @@
 const nodemailer = require('nodemailer');
 
 /**
- * Initializes Nodemailer Transport using SMTP configuration from .env.
+ * Nodemailer Transporter Configuration
+ * Uses Gmail SMTP by default for 100% Free OTP Email Dispatch (Up to 500 emails/day).
+ * Configured via EMAIL_USER and EMAIL_PASS in server/.env
  */
 const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-  port: parseInt(process.env.EMAIL_PORT) || 587,
-  secure: false, // TLS
+  service: 'gmail',
   auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
+    user: process.env.EMAIL_USER || 'your_email@gmail.com',
+    pass: process.env.EMAIL_PASS || 'your_16_character_app_password',
   },
-  tls: {
-    rejectUnauthorized: false
-  }
 });
 
 module.exports = transporter;
